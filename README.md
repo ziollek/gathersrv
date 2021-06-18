@@ -1,4 +1,4 @@
-# gathersrv
+# gathersrv - CoreDNS plugin
 
 ## Name
 
