@@ -52,6 +52,12 @@ func TestShouldProxyQualifiedRequestsToEachConfiguredCluster(t *testing.T) {
 			ExpectedRcode: dns.RcodeSuccess,
 			ExpectedError: nil,
 		},
+		"txt": {
+			GivenName:     "demo.svc.distro.local.",
+			GivenType:     dns.TypeTXT,
+			ExpectedRcode: dns.RcodeSuccess,
+			ExpectedError: nil,
+		},
 		"a": {
 			GivenName:     "a-demo-0.svc.distro.local.",
 			GivenType:     dns.TypeA,
@@ -70,6 +76,9 @@ func TestShouldProxyQualifiedRequestsToEachConfiguredCluster(t *testing.T) {
 		// ask about srv
 		"_http._tcp.demo.svc.cluster-a.local.": qualifiedQuestions["srv"],
 		"_http._tcp.demo.svc.cluster-b.local.": qualifiedQuestions["srv"],
+		// ask about TXT
+		"demo.svc.cluster-a.local.": qualifiedQuestions["txt"],
+		"demo.svc.cluster-b.local.": qualifiedQuestions["txt"],
 		// ask about A with hostname returned by srv
 		"demo-0.svc.cluster-a.local.": qualifiedQuestions["a"],
 		// ask about AAAA with hostname returned by srv

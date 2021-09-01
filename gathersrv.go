@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-var proxyTypes = [...]uint16{dns.TypeSRV, dns.TypeA, dns.TypeAAAA}
+var proxyTypes = [...]uint16{dns.TypeSRV, dns.TypeA, dns.TypeAAAA, dns.TypeTXT}
 
 type Cluster struct {
 	Suffix string
@@ -114,6 +114,7 @@ func (r *GatherResponsePrinter) WriteMsg(res *dns.Msg) error {
 	log.Infof("==============================gather, %v", res)
 	for _, rr := range state.Ns {
 		log.Infof("ns header: %v", rr.Header().Rrtype)
+		log.Infof("header %s", rr.Header().Name)
 	}
 	for _, rr := range state.Answer {
 		log.Infof("answer header: %v", rr.Header().Rrtype)
