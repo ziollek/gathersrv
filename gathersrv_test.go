@@ -170,6 +170,67 @@ func TestShouldTranslateResponsesFromClusters(t *testing.T) {
 	require.Equal(t, expectedExtras, msg.Extra)
 }
 
+func TestShouldTranslateResponsesWithDifferenceResponseCodesFromClusters(t *testing.T) {
+	failResponse := Assertion{
+		GivenName:     "_http._tcp.demo.svc.distro.local.",
+		GivenType:     dns.TypeSRV,
+		ExpectedRcode: dns.RcodeNameError,
+		ExpectedError: nil,
+	}
+	okResponse := Assertion{
+		GivenName:     "_http._tcp.demo.svc.distro.local.",
+		GivenType:     dns.TypeSRV,
+		ExpectedRcode: dns.RcodeSuccess,
+		ExpectedError: nil,
+	}
+	expectedAnswers := []dns.RR{
+		test.SRV("_http._tcp.demo.svc.distro.local. 30 IN SRV 0 50 8080 b-demo-0.svc.distro.local."),
+		test.SRV("_http._tcp.demo.svc.distro.local. 30 IN SRV 0 50 8080 b-demo-1.svc.distro.local."),
+	}
+
+	expectedExtras := []dns.RR{
+		test.A("b-demo-0.svc.distro.local. 30 IN A 10.9.1.2"),
+		test.A("b-demo-1.svc.distro.local. 30 IN A 10.9.1.3"),
+	}
+
+	expectedQuestions := map[string]Assertion{
+		"_http._tcp.demo.svc.cluster-a.local.": failResponse,
+		"_http._tcp.demo.svc.cluster-b.local.": okResponse,
+	}
+	answersFromCluster := map[string][]dns.RR{
+		"_http._tcp.demo.svc.cluster-a.local.": {},
+		"_http._tcp.demo.svc.cluster-b.local.": {
+			test.SRV("_http._tcp.demo.svc.cluster-b.local. 30 IN SRV 0 50 8080 demo-0.svc.cluster-b.local."),
+			test.SRV("_http._tcp.demo.svc.cluster-b.local. 30 IN SRV 0 50 8080 demo-1.svc.cluster-b.local."),
+		},
+	}
+	extrasFromClusters := map[string][]dns.RR{
+		"_http._tcp.demo.svc.cluster-a.local.": {},
+		"_http._tcp.demo.svc.cluster-b.local.": {
+			test.A("demo-0.svc.cluster-b.local. 30 IN A 10.9.1.2"),
+			test.A("demo-1.svc.cluster-b.local. 30 IN A 10.9.1.3"),
+		},
+	}
+
+	gatherPlugin := &GatherSrv{
+		Next:   PrepareContentNextHandler(expectedQuestions, answersFromCluster, extrasFromClusters),
+		Domain: "distro.local.",
+		Clusters: []Cluster{
+			{
+				Suffix: "cluster-a.local.",
+				Prefix: "a-",
+			},
+			{
+				Suffix: "cluster-b.local.",
+				Prefix: "b-",
+			},
+		},
+	}
+	msg := CheckAssertion(t, gatherPlugin, okResponse)
+	require.Equal(t, expectedAnswers, msg.Answer)
+	require.Equal(t, expectedExtras, msg.Extra)
+}
+
 func PrepareOnlyCodeNextHandler(expectedQuestions map[string]Assertion) test.Handler {
 	return test.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 		m := new(dns.Msg)

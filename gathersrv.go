@@ -102,14 +102,22 @@ func NewResponsePrinter(w dns.ResponseWriter, r *dns.Msg, domain string, cluster
 }
 
 func (r *GatherResponsePrinter) WriteMsg(res *dns.Msg) error {
+	state := res.Copy()
 	if r.state == nil {
 		r.state = res.Copy()
 		r.state.Question[0] = r.originalQuestion
 		r.state.Ns = []dns.RR{}
 		r.state.Answer = []dns.RR{}
 		r.state.Extra = []dns.RR{}
+	} else {
+		if state.Rcode == dns.RcodeSuccess && r.state.Rcode != dns.RcodeSuccess {
+			r.state.Rcode = state.Rcode
+			r.state.RecursionAvailable = state.RecursionAvailable
+			r.state.Authoritative = state.Authoritative
+			r.state.Truncated = state.Truncated
+		}
 	}
-	state := res.Copy()
+
 	state.Question[0] = r.originalQuestion
 	log.Infof("==============================gather, %v", res)
 	for _, rr := range state.Ns {
