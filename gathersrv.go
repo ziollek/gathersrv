@@ -158,19 +158,15 @@ func (r *GatherResponsePrinter) Masquerade(rr dns.RR) {
 				head, tail := divideDomain(strings.Replace(srvRecord.Target, cluster.Suffix, r.domain, 1))
 				srvRecord.Target = fmt.Sprintf("%s%s%s", head, cluster.Prefix, tail)
 				log.Infof("SRV target %s", rr.(*dns.SRV).String())
-				break
 			case dns.TypeA:
 				rr.Header().Name = fmt.Sprintf("%s%s%s", replaceHead, cluster.Prefix, replaceTail)
 				log.Infof("A target %s", rr.(*dns.A).String())
-				break
 			case dns.TypeAAAA:
 				rr.Header().Name = fmt.Sprintf("%s%s%s", replaceHead, cluster.Prefix, replaceTail)
 				log.Infof("AAAA target %s", rr.(*dns.AAAA).String())
-				break
 			case dns.TypeOPT:
 				// TODO: test case
 				// do not merge OPT records
-				break
 			default:
 				log.Infof("Unexpected type %v", rr.Header().Rrtype)
 			}
