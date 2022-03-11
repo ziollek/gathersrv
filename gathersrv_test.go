@@ -175,11 +175,15 @@ func PrepareOnlyCodeNextHandler(expectedQuestions map[string]Assertion) test.Han
 		m := new(dns.Msg)
 		if assertion, ok := expectedQuestions[r.Question[0].Name]; ok {
 			m.SetRcode(r, int(assertion.ExpectedRcode))
-			w.WriteMsg(m)
+			if err := w.WriteMsg(m); err !=nil {
+				return dns.RcodeServerFailure, err
+			}
 			return int(assertion.ExpectedRcode), assertion.ExpectedError
 		}
 		m.SetRcode(r, dns.RcodeServerFailure)
-		w.WriteMsg(m)
+		if err := w.WriteMsg(m); err !=nil {
+			return dns.RcodeServerFailure, err
+		}
 		return dns.RcodeServerFailure, nil
 	})
 }
@@ -191,11 +195,15 @@ func PrepareContentNextHandler(expectedQuestions map[string]Assertion, answers m
 			m.SetRcode(r, int(assertion.ExpectedRcode))
 			m.Answer = answers[r.Question[0].Name]
 			m.Extra = extras[r.Question[0].Name]
-			w.WriteMsg(m)
+			if err := w.WriteMsg(m); err !=nil {
+				return dns.RcodeServerFailure, err
+			}
 			return int(assertion.ExpectedRcode), assertion.ExpectedError
 		}
 		m.SetRcode(r, dns.RcodeServerFailure)
-		w.WriteMsg(m)
+		if err := w.WriteMsg(m); err !=nil {
+			return dns.RcodeServerFailure, err
+		}
 		return dns.RcodeServerFailure, nil
 	})
 }
