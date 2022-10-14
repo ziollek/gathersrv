@@ -166,8 +166,14 @@ func TestShouldTranslateResponsesFromClusters(t *testing.T) {
 		},
 	}
 	msg := CheckAssertion(t, gatherPlugin, assertion)
-	require.Equal(t, expectedAnswers, msg.Answer)
-	require.Equal(t, expectedExtras, msg.Extra)
+	require.Len(t, msg.Answer, len(expectedAnswers))
+	for _, record := range expectedAnswers {
+		require.Contains(t, msg.Answer, record)
+	}
+	require.Len(t, msg.Extra, len(expectedExtras))
+	for _, record := range expectedExtras {
+		require.Contains(t, msg.Extra, record)
+	}
 }
 
 func TestShouldTranslateResponsesWithDifferenceResponseCodesFromClusters(t *testing.T) {
@@ -236,13 +242,13 @@ func PrepareOnlyCodeNextHandler(expectedQuestions map[string]Assertion) test.Han
 		m := new(dns.Msg)
 		if assertion, ok := expectedQuestions[r.Question[0].Name]; ok {
 			m.SetRcode(r, int(assertion.ExpectedRcode))
-			if err := w.WriteMsg(m); err !=nil {
+			if err := w.WriteMsg(m); err != nil {
 				return dns.RcodeServerFailure, err
 			}
 			return int(assertion.ExpectedRcode), assertion.ExpectedError
 		}
 		m.SetRcode(r, dns.RcodeServerFailure)
-		if err := w.WriteMsg(m); err !=nil {
+		if err := w.WriteMsg(m); err != nil {
 			return dns.RcodeServerFailure, err
 		}
 		return dns.RcodeServerFailure, nil
@@ -256,13 +262,13 @@ func PrepareContentNextHandler(expectedQuestions map[string]Assertion, answers m
 			m.SetRcode(r, int(assertion.ExpectedRcode))
 			m.Answer = answers[r.Question[0].Name]
 			m.Extra = extras[r.Question[0].Name]
-			if err := w.WriteMsg(m); err !=nil {
+			if err := w.WriteMsg(m); err != nil {
 				return dns.RcodeServerFailure, err
 			}
 			return int(assertion.ExpectedRcode), assertion.ExpectedError
 		}
 		m.SetRcode(r, dns.RcodeServerFailure)
-		if err := w.WriteMsg(m); err !=nil {
+		if err := w.WriteMsg(m); err != nil {
 			return dns.RcodeServerFailure, err
 		}
 		return dns.RcodeServerFailure, nil
