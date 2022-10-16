@@ -9,6 +9,7 @@ import (
 	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
 	"strings"
+	"sync"
 )
 
 var proxyTypes = [...]uint16{dns.TypeSRV, dns.TypeA, dns.TypeAAAA, dns.TypeTXT}
@@ -24,9 +25,14 @@ type GatherSrv struct {
 	Clusters []Cluster
 }
 
+type NextResp struct {
+	Code int
+	Err  error
+}
+
 func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	var code int
-	var err error
+	var wg sync.WaitGroup
+
 	state := request.Request{W: w, Req: r}
 	if !gatherSrv.IsQualifiedQuestion(state.Req.Question[0]) {
 		unqualifiedRequestCount.WithLabelValues(metrics.WithServer(ctx)).Inc()
@@ -40,6 +46,7 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 	protocolPrefix, questionWithoutPrefix := divideDomain(question)
 
 	isSend := false
+	respChan := make(chan NextResp, len(gatherSrv.Clusters))
 	// TODO: clean up unnecessary logs
 	log.Infof("question type: %d, class: %d", state.Req.Question[0].Qtype, state.Req.Question[0].Qclass)
 
@@ -49,9 +56,14 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 			state.Req.Question[0].Name = protocolPrefix + strings.Replace(
 				strings.TrimPrefix(questionWithoutPrefix, cluster.Prefix), gatherSrv.Domain, cluster.Suffix, 1,
 			)
-			log.Infof("AAAAAASKs about: %s", state.Req.Question[0].Name)
+			log.Debugf("AAAAAASKs about: %s", state.Req.Question[0].Name)
 			pw.counter = 1
-			code, err = plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, pw, r)
+			wg.Add(1)
+			go func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
+				code, err := plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, pw, r)
+				respChan <- NextResp{Code: code, Err: err}
+				wg.Done()
+			}(ctx, pw, r.Copy())
 			isSend = true
 		}
 	}
@@ -59,15 +71,26 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 		for _, cluster := range gatherSrv.Clusters {
 			state.Req.Question[0].Name = strings.Replace(question, gatherSrv.Domain, cluster.Suffix, 1)
 			log.Debugf("Question name: %v", state.Req.Question[0].Name)
-			code, err = plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, pw, r)
-			log.Debugf("Result: %v %v", code, err)
+			wg.Add(1)
+			go func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
+				code, err := plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, pw, r)
+				log.Debugf("Result: %v %v", code, err)
+				respChan <- NextResp{Code: code, Err: err}
+				wg.Done()
+			}(ctx, pw, r.Copy())
 			isSend = true
 		}
 	}
 	if !isSend {
-		code, err = plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, w, r)
+		close(respChan)
+		return plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, w, r)
+	} else {
+		wg.Wait()
+		r := <-respChan
+		close(respChan)
+		// todo - figure out better way to merge response codes & errors
+		return r.Code, r.Err
 	}
-	return code, err
 }
 
 func (gatherSrv GatherSrv) IsQualifiedQuestion(question dns.Question) bool {
@@ -82,6 +105,7 @@ func (gatherSrv GatherSrv) Ready() bool { return true }
 
 type GatherResponsePrinter struct {
 	originalQuestion dns.Question
+	lockCh           chan bool
 	domain           string
 	counter          int
 	clusters         []Cluster
@@ -92,6 +116,7 @@ type GatherResponsePrinter struct {
 // NewResponsePrinter returns ResponseWriter.
 func NewResponsePrinter(w dns.ResponseWriter, r *dns.Msg, domain string, clusters []Cluster) *GatherResponsePrinter {
 	return &GatherResponsePrinter{
+		lockCh:           make(chan bool, 1),
 		ResponseWriter:   w,
 		originalQuestion: r.Question[0],
 		domain:           domain,
@@ -101,69 +126,64 @@ func NewResponsePrinter(w dns.ResponseWriter, r *dns.Msg, domain string, cluster
 	}
 }
 
-func (r *GatherResponsePrinter) WriteMsg(res *dns.Msg) error {
+func (w *GatherResponsePrinter) WriteMsg(res *dns.Msg) error {
+	w.lockCh <- true
+	defer func() {
+		<-w.lockCh
+	}()
 	state := res.Copy()
-	if r.state == nil {
-		r.state = res.Copy()
-		r.state.Question[0] = r.originalQuestion
-		r.state.Ns = []dns.RR{}
-		r.state.Answer = []dns.RR{}
-		r.state.Extra = []dns.RR{}
+	if w.state == nil {
+		w.state = res.Copy()
+		w.state.Question[0] = w.originalQuestion
+		w.state.Ns = []dns.RR{}
+		w.state.Answer = []dns.RR{}
+		w.state.Extra = []dns.RR{}
 	} else {
-		if state.Rcode == dns.RcodeSuccess && r.state.Rcode != dns.RcodeSuccess {
-			r.state.Rcode = state.Rcode
-			r.state.RecursionAvailable = state.RecursionAvailable
-			r.state.Authoritative = state.Authoritative
-			r.state.Truncated = state.Truncated
+		if state.Rcode == dns.RcodeSuccess && w.state.Rcode != dns.RcodeSuccess {
+			w.state.Rcode = state.Rcode
+			w.state.RecursionAvailable = state.RecursionAvailable
+			w.state.Authoritative = state.Authoritative
+			w.state.Truncated = state.Truncated
 		}
 	}
 
-	state.Question[0] = r.originalQuestion
-	log.Infof("==============================gather, %v", res)
-	for _, rr := range state.Ns {
-		log.Infof("ns header: %v", rr.Header().Rrtype)
-		log.Infof("header %s", rr.Header().Name)
-	}
+	state.Question[0] = w.originalQuestion
 	for _, rr := range state.Answer {
-		log.Infof("answer header: %v", rr.Header().Rrtype)
-		r.Masquerade(rr)
-		r.state.Answer = append(r.state.Answer, rr)
+		w.Masquerade(rr)
+		w.state.Answer = append(w.state.Answer, rr)
 
 	}
 	for _, rr := range state.Extra {
 		if rr.Header().Rrtype == dns.TypeOPT {
 			continue
 		}
-		log.Infof("extra header: %v", rr.Header().Rrtype)
-		log.Infof("header %s", rr.Header().Name)
-		log.Infof("header ptr %p", rr.Header())
-		r.Masquerade(rr)
-		r.state.Extra = append(r.state.Extra, rr)
+		w.Masquerade(rr)
+		w.state.Extra = append(w.state.Extra, rr)
 	}
 
-	if r.counter--; r.counter > 0 {
+	if w.counter--; w.counter > 0 {
 		return nil
 	}
 	for _, rr := range state.Extra {
 		if rr.Header().Rrtype == dns.TypeOPT {
-			r.state.Extra = append(r.state.Extra, rr)
+			w.state.Extra = append(w.state.Extra, rr)
 		}
 	}
-	log.Infof("gather, %v", r.state)
-	return r.ResponseWriter.WriteMsg(r.state)
+	log.Infof("gather, %v", w.state)
+	return w.ResponseWriter.WriteMsg(w.state)
 }
 
-func (r *GatherResponsePrinter) Masquerade(rr dns.RR) {
+func (w *GatherResponsePrinter) Masquerade(rr dns.RR) {
 	// TODO: extract to specialized class
 	log.Infof("header ptr %p", rr.Header())
-	for _, cluster := range r.clusters {
+	for _, cluster := range w.clusters {
 		if strings.HasSuffix(rr.Header().Name, cluster.Suffix) {
-			replaceHead, replaceTail := divideDomain(strings.Replace(rr.Header().Name, cluster.Suffix, r.domain, 1))
+			replaceHead, replaceTail := divideDomain(strings.Replace(rr.Header().Name, cluster.Suffix, w.domain, 1))
 			switch rr.Header().Rrtype {
 			case dns.TypeSRV:
 				srvRecord := rr.(*dns.SRV)
 				srvRecord.Header().Name = replaceHead + replaceTail
-				head, tail := divideDomain(strings.Replace(srvRecord.Target, cluster.Suffix, r.domain, 1))
+				head, tail := divideDomain(strings.Replace(srvRecord.Target, cluster.Suffix, w.domain, 1))
 				srvRecord.Target = fmt.Sprintf("%s%s%s", head, cluster.Prefix, tail)
 				log.Infof("SRV target %s", rr.(*dns.SRV).String())
 			case dns.TypeA:
