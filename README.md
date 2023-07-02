@@ -2,13 +2,13 @@
 
 ## Name
 
-*gathersrv* - gather srv dns response from several domains (for example k8s clusters) and hide them behind single **common/distributed** domain
+*gathersrv* - gather DNS responses with SRV records from several domains (for example k8s clusters) and hide them behind a single **common/distributed** domain
 
 ## Description
 
-This plugin could be helpful for services which are logically distributed over several k8s clusters and use [headless service](https://kubernetes.io/docs/concepts/services-networking/service/#headless-services) to expose themselves.
-Aim of this plugin is to provide method to discover all service instances through single service domain. The result of querying distributed service domain contains
-masquerade results gathered from multiple clusters.
+This plugin could be helpful for services that are logically distributed over several k8s clusters and use [headless service](https://kubernetes.io/docs/concepts/services-networking/service/#headless-services) to expose themselves.
+The aim of this plugin is to provide a method to discover all service instances through a single service domain. The result of querying distributed service domain contains
+masqueraded results gathered from multiple clusters.
 
 
 ## Use case

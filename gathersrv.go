@@ -47,8 +47,6 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 
 	isSend := false
 	respChan := make(chan NextResp, len(gatherSrv.Clusters))
-	// TODO: clean up unnecessary logs
-	log.Infof("question type: %d, class: %d", state.Req.Question[0].Qtype, state.Req.Question[0].Qclass)
 
 	// TODO: parallel proxy requests
 	for _, cluster := range gatherSrv.Clusters {
@@ -56,7 +54,6 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 			state.Req.Question[0].Name = protocolPrefix + strings.Replace(
 				strings.TrimPrefix(questionWithoutPrefix, cluster.Prefix), gatherSrv.Domain, cluster.Suffix, 1,
 			)
-			log.Debugf("AAAAAASKs about: %s", state.Req.Question[0].Name)
 			pw.counter = 1
 			wg.Add(1)
 			go func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
@@ -70,11 +67,9 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 	if !isSend {
 		for _, cluster := range gatherSrv.Clusters {
 			state.Req.Question[0].Name = strings.Replace(question, gatherSrv.Domain, cluster.Suffix, 1)
-			log.Debugf("Question name: %v", state.Req.Question[0].Name)
 			wg.Add(1)
 			go func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 				code, err := plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, pw, r)
-				log.Debugf("Result: %v %v", code, err)
 				respChan <- NextResp{Code: code, Err: err}
 				wg.Done()
 			}(ctx, pw, r.Copy())
@@ -175,7 +170,6 @@ func (w *GatherResponsePrinter) WriteMsg(res *dns.Msg) error {
 
 func (w *GatherResponsePrinter) Masquerade(rr dns.RR) {
 	// TODO: extract to specialized class
-	log.Infof("header ptr %p", rr.Header())
 	for _, cluster := range w.clusters {
 		if strings.HasSuffix(rr.Header().Name, cluster.Suffix) {
 			replaceHead, replaceTail := divideDomain(strings.Replace(rr.Header().Name, cluster.Suffix, w.domain, 1))
@@ -185,13 +179,10 @@ func (w *GatherResponsePrinter) Masquerade(rr dns.RR) {
 				srvRecord.Header().Name = replaceHead + replaceTail
 				head, tail := divideDomain(strings.Replace(srvRecord.Target, cluster.Suffix, w.domain, 1))
 				srvRecord.Target = fmt.Sprintf("%s%s%s", head, cluster.Prefix, tail)
-				log.Infof("SRV target %s", rr.(*dns.SRV).String())
 			case dns.TypeA:
 				rr.Header().Name = fmt.Sprintf("%s%s%s", replaceHead, cluster.Prefix, replaceTail)
-				log.Infof("A target %s", rr.(*dns.A).String())
 			case dns.TypeAAAA:
 				rr.Header().Name = fmt.Sprintf("%s%s%s", replaceHead, cluster.Prefix, replaceTail)
-				log.Infof("AAAA target %s", rr.(*dns.AAAA).String())
 			case dns.TypeOPT:
 				// TODO: test case
 				// do not merge OPT records
