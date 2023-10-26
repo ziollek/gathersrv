@@ -7,16 +7,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-var qualifiedRequestCount = promauto.NewCounterVec(prometheus.CounterOpts{
+var requestCount = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: plugin.Namespace,
 	Subsystem: gatherSrvPluginName,
-	Name:      "qualified_request_count_total",
-	Help:      "Counter of qualified requests made.",
-}, []string{"server"})
+	Name:      "request_count_total",
+	Help:      "Counter of requests processed via plugin",
+}, []string{"server", "qualified", "type"})
 
-var unqualifiedRequestCount = promauto.NewCounterVec(prometheus.CounterOpts{
+var subRequestCount = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: plugin.Namespace,
 	Subsystem: gatherSrvPluginName,
-	Name:      "unqualified_request_count_total",
-	Help:      "Counter of unqualified requests made.",
-}, []string{"server"})
+	Name:      "sub_request_count_total",
+	Help:      "Counter of sub requests.",
+}, []string{"server", "prefix", "type", "code"})

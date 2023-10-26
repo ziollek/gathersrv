@@ -2,6 +2,7 @@ package gathersrv
 
 import (
 	"context"
+	"errors"
 	"github.com/coredns/coredns/plugin/pkg/dnstest"
 	"github.com/coredns/coredns/plugin/test"
 	"github.com/miekg/dns"
@@ -176,12 +177,12 @@ func TestShouldTranslateResponsesFromClusters(t *testing.T) {
 	}
 }
 
-func TestShouldTranslateResponsesWithDifferenceResponseCodesFromClusters(t *testing.T) {
+func TestShouldProvideNoErrorResponseWhenNoErrorAndErrorResponsesOccurredTogether(t *testing.T) {
 	failResponse := Assertion{
 		GivenName:     "_http._tcp.demo.svc.distro.local.",
 		GivenType:     dns.TypeSRV,
 		ExpectedRcode: dns.RcodeNameError,
-		ExpectedError: nil,
+		ExpectedError: errors.New("timeout occurred"),
 	}
 	okResponse := Assertion{
 		GivenName:     "_http._tcp.demo.svc.distro.local.",
@@ -222,13 +223,14 @@ func TestShouldTranslateResponsesWithDifferenceResponseCodesFromClusters(t *test
 		Next:   PrepareContentNextHandler(expectedQuestions, answersFromCluster, extrasFromClusters),
 		Domain: "distro.local.",
 		Clusters: []Cluster{
-			{
-				Suffix: "cluster-a.local.",
-				Prefix: "a-",
-			},
+
 			{
 				Suffix: "cluster-b.local.",
 				Prefix: "b-",
+			},
+			{
+				Suffix: "cluster-a.local.",
+				Prefix: "a-",
 			},
 		},
 	}

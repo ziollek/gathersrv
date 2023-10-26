@@ -10,6 +10,7 @@ import (
 	"github.com/miekg/dns"
 	"strings"
 	"sync"
+	"time"
 )
 
 var proxyTypes = [...]uint16{dns.TypeSRV, dns.TypeA, dns.TypeAAAA, dns.TypeTXT}
@@ -34,21 +35,32 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 	var wg sync.WaitGroup
 
 	state := request.Request{W: w, Req: r}
+	questionType := dns.Type(state.Req.Question[0].Qtype).String()
 	if !gatherSrv.IsQualifiedQuestion(state.Req.Question[0]) {
-		unqualifiedRequestCount.WithLabelValues(metrics.WithServer(ctx)).Inc()
+		requestCount.WithLabelValues(metrics.WithServer(ctx), "false", questionType).Inc()
 		return plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, w, r)
 	}
 
-	qualifiedRequestCount.WithLabelValues(metrics.WithServer(ctx)).Inc()
+	requestCount.WithLabelValues(metrics.WithServer(ctx), "true", questionType).Inc()
 
 	pw := NewResponsePrinter(w, r, gatherSrv.Domain, gatherSrv.Clusters)
 	question := state.Req.Question[0].Name
+
 	protocolPrefix, questionWithoutPrefix := divideDomain(question)
 
 	isSend := false
 	respChan := make(chan NextResp, len(gatherSrv.Clusters))
 
-	// TODO: parallel proxy requests
+	doSubRequest := func(ctx context.Context, prefix string, pw dns.ResponseWriter, r *dns.Msg) {
+		code, err := plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, pw, r)
+		subRequestCount.WithLabelValues(metrics.WithServer(ctx), prefix, questionType, fmt.Sprintf("%d", code))
+		if err != nil {
+			log.Warningf("Error occurred for: type=%s, question=%s, error=%s", questionType, r.Question[0].Name, err)
+		}
+		respChan <- NextResp{Code: code, Err: err}
+		wg.Done()
+	}
+
 	for _, cluster := range gatherSrv.Clusters {
 		if strings.HasPrefix(questionWithoutPrefix, cluster.Prefix) {
 			state.Req.Question[0].Name = protocolPrefix + strings.Replace(
@@ -56,11 +68,7 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 			)
 			pw.counter = 1
 			wg.Add(1)
-			go func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
-				code, err := plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, pw, r)
-				respChan <- NextResp{Code: code, Err: err}
-				wg.Done()
-			}(ctx, pw, r.Copy())
+			go doSubRequest(ctx, cluster.Prefix, pw, r.Copy())
 			isSend = true
 		}
 	}
@@ -68,11 +76,7 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 		for _, cluster := range gatherSrv.Clusters {
 			state.Req.Question[0].Name = strings.Replace(question, gatherSrv.Domain, cluster.Suffix, 1)
 			wg.Add(1)
-			go func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
-				code, err := plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, pw, r)
-				respChan <- NextResp{Code: code, Err: err}
-				wg.Done()
-			}(ctx, pw, r.Copy())
+			go doSubRequest(ctx, cluster.Prefix, pw, r.Copy())
 			isSend = true
 		}
 	}
@@ -82,8 +86,15 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 	} else {
 		wg.Wait()
 		r := <-respChan
+		for len(respChan) > 0 {
+			n := <-respChan
+			// return no error if at least one sub-request went well
+			if n.Err == nil && r.Err != nil {
+				r = n
+			}
+		}
 		close(respChan)
-		// todo - figure out better way to merge response codes & errors
+		pw.shortMessage()
 		return r.Code, r.Err
 	}
 }
@@ -105,6 +116,7 @@ type GatherResponsePrinter struct {
 	counter          int
 	clusters         []Cluster
 	state            *dns.Msg
+	start            time.Time
 	dns.ResponseWriter
 }
 
@@ -118,6 +130,7 @@ func NewResponsePrinter(w dns.ResponseWriter, r *dns.Msg, domain string, cluster
 		clusters:         clusters,
 		counter:          len(clusters),
 		state:            nil,
+		start:            time.Now(),
 	}
 }
 
@@ -164,7 +177,6 @@ func (w *GatherResponsePrinter) WriteMsg(res *dns.Msg) error {
 			w.state.Extra = append(w.state.Extra, rr)
 		}
 	}
-	log.Infof("gather, %v", w.state)
 	return w.ResponseWriter.WriteMsg(w.state)
 }
 
@@ -191,7 +203,21 @@ func (w *GatherResponsePrinter) Masquerade(rr dns.RR) {
 			}
 		}
 	}
+}
 
+func (w *GatherResponsePrinter) shortMessage() {
+	questionType := dns.Type(w.state.Question[0].Qtype).String()
+	log.Infof(
+		"type=%s, question=%s, response=%s, answer-records=%d, extra-records=%d, gathered=%d, not-gatherer=%d, duration=%s",
+		questionType,
+		w.state.Question[0].Name,
+		strings.Split(w.state.MsgHdr.String(), "\n")[0],
+		len(w.state.Answer),
+		len(w.state.Extra),
+		len(w.clusters)-w.counter,
+		w.counter,
+		time.Since(w.start),
+	)
 }
 
 func divideDomain(domain string) (string, string) {
