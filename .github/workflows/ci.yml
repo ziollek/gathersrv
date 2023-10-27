@@ -1,4 +1,4 @@
-name: Continious integration
+name: Continuous integration
 
 on:
   workflow_dispatch:
@@ -22,10 +22,9 @@ jobs:
           ref: ${{ github.head_ref }}
 
       - name: Run lint
-        uses: golangci/golangci-lint-action@v2
+        uses: golangci/golangci-lint-action@v3
         with:
-          version: v1.42.1
-          skip-go-installation: true
+          version:  v1.54
           skip-pkg-cache: true
 
       - name: Run tests

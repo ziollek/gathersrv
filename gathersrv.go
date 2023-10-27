@@ -44,6 +44,49 @@ type subRequest struct {
 	request *dns.Msg
 }
 
+// we need a channel that:
+// * clear all remaining messages on close
+// * drop all incoming messages after close
+type closableChannel[T any] struct {
+	messageCh chan T
+	lockCh    chan bool
+	open      bool
+}
+
+func (cc *closableChannel[T]) Read() <-chan T {
+	return cc.messageCh
+}
+
+func (cc *closableChannel[T]) Deposit(message T) {
+	cc.lockCh <- true
+	defer func() {
+		<-cc.lockCh
+	}()
+	if cc.open {
+		cc.messageCh <- message
+	}
+}
+
+func (cc *closableChannel[T]) Close() {
+	cc.lockCh <- true
+	defer func() {
+		<-cc.lockCh
+		close(cc.messageCh)
+	}()
+	cc.open = false
+	for len(cc.messageCh) > 0 {
+		<-cc.messageCh
+	}
+}
+
+func newClosableChannel[T any](size int) *closableChannel[T] {
+	return &closableChannel[T]{
+		messageCh: make(chan T, size),
+		lockCh:    make(chan bool, 1),
+		open:      true,
+	}
+}
+
 func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	questionType := dns.Type(r.Question[0].Qtype).String()
 	if !gatherSrv.IsQualifiedQuestion(r.Question[0]) {
@@ -54,8 +97,8 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 
 	// build proper number of sub-requests depends on defined clusters
 	subRequests := gatherSrv.prepareSubRequests(r)
-	respChan := make(chan *NextResp, len(subRequests))
-	defer close(respChan)
+	respChan := newClosableChannel[*NextResp](len(subRequests))
+	defer respChan.Close()
 	pw := NewResponsePrinter(w, r, gatherSrv.Domain, gatherSrv.Clusters, len(subRequests))
 
 	// call sub-requests in parallel manner
@@ -70,7 +113,7 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 				err,
 			)
 		}
-		respChan <- &NextResp{Code: code, Err: err}
+		respChan.Deposit(&NextResp{Code: code, Err: err})
 	}
 	for _, subRequestParams := range subRequests {
 		go doSubRequest(ctx, pw, subRequestParams)
@@ -80,7 +123,7 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 	mergedResponse := &NextResp{empty: true}
 	for waitCnt := len(subRequests); waitCnt > 0; waitCnt-- {
 		select {
-		case subResponse := <-respChan:
+		case subResponse := <-respChan.Read():
 			mergedResponse.Reduce(subResponse)
 		case <-ctx.Done():
 			waitCnt = 0
@@ -111,7 +154,6 @@ func (gatherSrv GatherSrv) prepareSubRequests(r *dns.Msg) (calls []*subRequest) 
 			calls = append(calls, &subRequest{cluster.Prefix, sr})
 		}
 	}
-	log.Infof("calls %v, clusters %v", calls, gatherSrv.Clusters)
 	return
 }
 
