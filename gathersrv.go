@@ -6,10 +6,8 @@ import (
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/metrics"
 	"github.com/coredns/coredns/plugin/pkg/log"
-	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -27,76 +25,94 @@ type GatherSrv struct {
 }
 
 type NextResp struct {
-	Code int
-	Err  error
+	Code  int
+	Err   error
+	empty bool
+}
+
+func (nr *NextResp) Reduce(subsequentResponse *NextResp) {
+	// return no error if at least one sub-request went well
+	if nr.empty || (nr.Err != nil && subsequentResponse.Err == nil) {
+		nr.empty = false
+		nr.Err = subsequentResponse.Err
+		nr.Code = subsequentResponse.Code
+	}
+}
+
+type subRequest struct {
+	prefix  string
+	request *dns.Msg
 }
 
 func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	var wg sync.WaitGroup
-
-	state := request.Request{W: w, Req: r}
-	questionType := dns.Type(state.Req.Question[0].Qtype).String()
-	if !gatherSrv.IsQualifiedQuestion(state.Req.Question[0]) {
+	questionType := dns.Type(r.Question[0].Qtype).String()
+	if !gatherSrv.IsQualifiedQuestion(r.Question[0]) {
 		requestCount.WithLabelValues(metrics.WithServer(ctx), "false", questionType).Inc()
 		return plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, w, r)
 	}
-
 	requestCount.WithLabelValues(metrics.WithServer(ctx), "true", questionType).Inc()
 
-	pw := NewResponsePrinter(w, r, gatherSrv.Domain, gatherSrv.Clusters)
-	question := state.Req.Question[0].Name
+	// build proper number of sub-requests depends on defined clusters
+	subRequests := gatherSrv.prepareSubRequests(r)
+	respChan := make(chan *NextResp, len(subRequests))
+	defer close(respChan)
+	pw := NewResponsePrinter(w, r, gatherSrv.Domain, gatherSrv.Clusters, len(subRequests))
 
-	protocolPrefix, questionWithoutPrefix := divideDomain(question)
-
-	isSend := false
-	respChan := make(chan NextResp, len(gatherSrv.Clusters))
-
-	doSubRequest := func(ctx context.Context, prefix string, pw dns.ResponseWriter, r *dns.Msg) {
-		code, err := plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, pw, r)
-		subRequestCount.WithLabelValues(metrics.WithServer(ctx), prefix, questionType, fmt.Sprintf("%d", code))
+	// call sub-requests in parallel manner
+	doSubRequest := func(ctx context.Context, pw dns.ResponseWriter, s *subRequest) {
+		code, err := plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, pw, s.request)
+		subRequestCount.WithLabelValues(metrics.WithServer(ctx), s.prefix, questionType, fmt.Sprintf("%d", code))
 		if err != nil {
-			log.Warningf("Error occurred for: type=%s, question=%s, error=%s", questionType, r.Question[0].Name, err)
+			log.Warningf(
+				"Error occurred for: type=%s, question=%s, error=%s",
+				questionType,
+				s.request.Question[0].Name,
+				err,
+			)
 		}
-		respChan <- NextResp{Code: code, Err: err}
-		wg.Done()
+		respChan <- &NextResp{Code: code, Err: err}
 	}
+	for _, subRequestParams := range subRequests {
+		go doSubRequest(ctx, pw, subRequestParams)
+	}
+
+	// gather all responses or return partial response on context done
+	mergedResponse := &NextResp{empty: true}
+	for waitCnt := len(subRequests); waitCnt > 0; waitCnt-- {
+		select {
+		case subResponse := <-respChan:
+			mergedResponse.Reduce(subResponse)
+		case <-ctx.Done():
+			waitCnt = 0
+		}
+	}
+	pw.Flush()
+	return mergedResponse.Code, mergedResponse.Err
+}
+
+func (gatherSrv GatherSrv) prepareSubRequests(r *dns.Msg) (calls []*subRequest) {
+	question := r.Question[0].Name
+	protocolPrefix, questionWithoutPrefix := divideDomain(r.Question[0].Name)
 
 	for _, cluster := range gatherSrv.Clusters {
 		if strings.HasPrefix(questionWithoutPrefix, cluster.Prefix) {
-			state.Req.Question[0].Name = protocolPrefix + strings.Replace(
+			sr := r.Copy()
+			sr.Question[0].Name = protocolPrefix + strings.Replace(
 				strings.TrimPrefix(questionWithoutPrefix, cluster.Prefix), gatherSrv.Domain, cluster.Suffix, 1,
 			)
-			pw.counter = 1
-			wg.Add(1)
-			go doSubRequest(ctx, cluster.Prefix, pw, r.Copy())
-			isSend = true
+			calls = append(calls, &subRequest{cluster.Prefix, sr})
 		}
 	}
-	if !isSend {
+
+	if len(calls) == 0 {
 		for _, cluster := range gatherSrv.Clusters {
-			state.Req.Question[0].Name = strings.Replace(question, gatherSrv.Domain, cluster.Suffix, 1)
-			wg.Add(1)
-			go doSubRequest(ctx, cluster.Prefix, pw, r.Copy())
-			isSend = true
+			sr := r.Copy()
+			sr.Question[0].Name = strings.Replace(question, gatherSrv.Domain, cluster.Suffix, 1)
+			calls = append(calls, &subRequest{cluster.Prefix, sr})
 		}
 	}
-	if !isSend {
-		close(respChan)
-		return plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, w, r)
-	} else {
-		wg.Wait()
-		r := <-respChan
-		for len(respChan) > 0 {
-			n := <-respChan
-			// return no error if at least one sub-request went well
-			if n.Err == nil && r.Err != nil {
-				r = n
-			}
-		}
-		close(respChan)
-		pw.shortMessage()
-		return r.Code, r.Err
-	}
+	log.Infof("calls %v, clusters %v", calls, gatherSrv.Clusters)
+	return
 }
 
 func (gatherSrv GatherSrv) IsQualifiedQuestion(question dns.Question) bool {
@@ -121,14 +137,14 @@ type GatherResponsePrinter struct {
 }
 
 // NewResponsePrinter returns ResponseWriter.
-func NewResponsePrinter(w dns.ResponseWriter, r *dns.Msg, domain string, clusters []Cluster) *GatherResponsePrinter {
+func NewResponsePrinter(w dns.ResponseWriter, r *dns.Msg, domain string, clusters []Cluster, counter int) *GatherResponsePrinter {
 	return &GatherResponsePrinter{
 		lockCh:           make(chan bool, 1),
 		ResponseWriter:   w,
 		originalQuestion: r.Question[0],
 		domain:           domain,
 		clusters:         clusters,
-		counter:          len(clusters),
+		counter:          counter,
 		state:            nil,
 		start:            time.Now(),
 	}
@@ -177,7 +193,7 @@ func (w *GatherResponsePrinter) WriteMsg(res *dns.Msg) error {
 			w.state.Extra = append(w.state.Extra, rr)
 		}
 	}
-	return w.ResponseWriter.WriteMsg(w.state)
+	return nil
 }
 
 func (w *GatherResponsePrinter) Masquerade(rr dns.RR) {
@@ -205,19 +221,40 @@ func (w *GatherResponsePrinter) Masquerade(rr dns.RR) {
 	}
 }
 
+func (w *GatherResponsePrinter) Flush() {
+	w.lockCh <- true
+	defer func() {
+		<-w.lockCh
+	}()
+	if w.state != nil {
+		if err := w.ResponseWriter.WriteMsg(w.state); err != nil {
+			log.Errorf(
+				"error occurred while writing response: question=%v, error=%s", w.originalQuestion, err,
+			)
+		}
+	}
+	w.shortMessage()
+}
+
 func (w *GatherResponsePrinter) shortMessage() {
-	questionType := dns.Type(w.state.Question[0].Qtype).String()
-	log.Infof(
-		"type=%s, question=%s, response=%s, answer-records=%d, extra-records=%d, gathered=%d, not-gatherer=%d, duration=%s",
-		questionType,
-		w.state.Question[0].Name,
-		strings.Split(w.state.MsgHdr.String(), "\n")[0],
-		len(w.state.Answer),
-		len(w.state.Extra),
-		len(w.clusters)-w.counter,
-		w.counter,
-		time.Since(w.start),
-	)
+	if w.state != nil {
+		questionType := dns.Type(w.state.Question[0].Qtype).String()
+		log.Infof(
+			"type=%s, question=%s, response=%s, answer-records=%d, extra-records=%d, gathered=%d, not-gatherer=%d, duration=%s",
+			questionType,
+			w.state.Question[0].Name,
+			strings.Split(w.state.MsgHdr.String(), "\n")[0],
+			len(w.state.Answer),
+			len(w.state.Extra),
+			len(w.clusters)-w.counter,
+			w.counter,
+			time.Since(w.start),
+		)
+	} else {
+		log.Errorf(
+			"response printer has an empty state, original question was: %v", w.originalQuestion,
+		)
+	}
 }
 
 func divideDomain(domain string) (string, string) {

@@ -20,15 +20,15 @@ type Assertion struct {
 func TestShouldNotProxyUnqualifiedRequests(t *testing.T) {
 	unqualifiedQuestions := map[string]Assertion{
 		// asks about type which is not supported by plugin
-		"_http._tcp.demo.svc.distro.local.": {
-			GivenName:     "_http._tcp.demo.svc.distro.local.",
+		"_smtp._tcp.demo.svc.distro.local.": {
+			GivenName:     "_smtp._tcp.demo.svc.distro.local.",
 			GivenType:     dns.TypeMX,
 			ExpectedRcode: dns.RcodeNameError,
 			ExpectedError: nil,
 		},
 		// asks about domain which is not handled
 		"_http._tcp.demo.svc.unsupported.local.": {
-			GivenName:     "_http._tcp.demo.svc.distro.local.",
+			GivenName:     "_http._tcp.demo.svc.unsupported.local.",
 			GivenType:     dns.TypeSRV,
 			ExpectedRcode: dns.RcodeNameError,
 			ExpectedError: nil,
