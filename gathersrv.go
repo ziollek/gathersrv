@@ -104,7 +104,7 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 	// call sub-requests in parallel manner
 	doSubRequest := func(ctx context.Context, pw dns.ResponseWriter, s *subRequest) {
 		code, err := plugin.NextOrFailure(gatherSrv.Name(), gatherSrv.Next, ctx, pw, s.request)
-		subRequestCount.WithLabelValues(metrics.WithServer(ctx), s.prefix, questionType, fmt.Sprintf("%d", code))
+		subRequestCount.WithLabelValues(metrics.WithServer(ctx), s.prefix, questionType, fmt.Sprintf("%d", code)).Inc()
 		if err != nil {
 			log.Warningf(
 				"Error occurred for: type=%s, question=%s, error=%s",
