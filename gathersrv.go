@@ -129,7 +129,7 @@ func (gatherSrv GatherSrv) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 			waitCnt = 0
 		}
 	}
-	pw.Flush()
+	pw.Flush(r)
 	return mergedResponse.Code, mergedResponse.Err
 }
 
@@ -263,17 +263,27 @@ func (w *GatherResponsePrinter) Masquerade(rr dns.RR) {
 	}
 }
 
-func (w *GatherResponsePrinter) Flush() {
+func (w *GatherResponsePrinter) Flush(r *dns.Msg) {
 	w.lockCh <- true
 	defer func() {
 		<-w.lockCh
 	}()
-	if w.state != nil {
-		if err := w.ResponseWriter.WriteMsg(w.state); err != nil {
-			log.Errorf(
-				"error occurred while writing response: question=%v, error=%s", w.originalQuestion, err,
-			)
-		}
+	response := w.state
+	if w.state == nil {
+		// prepare SRVFAIL, Error Code 23 - Network Error response if no sub-queries are not completed
+		response = new(dns.Msg)
+		response.SetReply(r)
+		response.Rcode = dns.RcodeServerFailure
+		response = response.SetEdns0(4096, true)
+		response.IsEdns0().Option = append(
+			response.IsEdns0().Option,
+			&dns.EDNS0_EDE{InfoCode: dns.ExtendedErrorCodeNetworkError, ExtraText: "Sub-queries canceled due to timeout"},
+		)
+	}
+	if err := w.ResponseWriter.WriteMsg(response); err != nil {
+		log.Errorf(
+			"error occurred while writing response: question=%v, error=%s", w.originalQuestion, err,
+		)
 	}
 	w.shortMessage()
 }
@@ -294,7 +304,7 @@ func (w *GatherResponsePrinter) shortMessage() {
 		)
 	} else {
 		log.Errorf(
-			"response printer has an empty state, original question was: %v", w.originalQuestion,
+			"response printer has an empty state - SERVFAIL returned, original question was: %v", w.originalQuestion,
 		)
 	}
 }

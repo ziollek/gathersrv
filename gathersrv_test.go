@@ -239,6 +239,28 @@ func TestShouldProvideNoErrorResponseWhenNoErrorAndErrorResponsesOccurredTogethe
 	require.Equal(t, expectedExtras, msg.Extra)
 }
 
+func TestShouldReturnServerFailCodeWithExtendedContextIfNoSubQueryIsReadyOnFlush(t *testing.T) {
+	req := new(dns.Msg)
+	req.SetQuestion(dns.Fqdn("_http._tcp.demo.svc.distro.local."), dns.TypeSRV)
+	rec := dnstest.NewRecorder(&test.ResponseWriter{})
+	printer := NewResponsePrinter(
+		rec,
+		req,
+		"distro.local.",
+		[]Cluster{{Suffix: "cluster-a.local.", Prefix: "a-"}},
+		1,
+	)
+
+	printer.Flush(req)
+
+	require.Equal(t, dns.RcodeServerFailure, rec.Msg.Rcode)
+	require.Len(t, rec.Msg.IsEdns0().Option, 1)
+	require.Equal(t, uint16(dns.EDNS0EDE), rec.Msg.IsEdns0().Option[0].Option())
+	extendedError, ok := rec.Msg.IsEdns0().Option[0].(*dns.EDNS0_EDE)
+	require.True(t, ok)
+	require.Equal(t, dns.ExtendedErrorCodeNetworkError, extendedError.InfoCode)
+}
+
 func PrepareOnlyCodeNextHandler(expectedQuestions map[string]Assertion) test.Handler {
 	return test.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 		m := new(dns.Msg)
